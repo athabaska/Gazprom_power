@@ -16,8 +16,10 @@ namespace PowerPosition.Core
     /// </summary>
     public class Extractor
     {
-        private const string CfgFolderName = "csvFolder";
-        private const string DefaultFolder = "extractions";
+        private const string CfgCsvFolderName = "csvFolder";
+        private const string DefaultCsvFolder = "extractions";
+        private const string CfgLogFolderName = "logFolder";
+        private const string DefaultLogFolder = "logs";
         private const string CfgFreqName = "extractFrequency";
         private const int DefaultFreq = 5;
         private const string CsvFileHeader = "LocalTime;Volume";
@@ -48,19 +50,29 @@ namespace PowerPosition.Core
         /// </summary>
         private readonly StreamWriter _logger;
 
+        private bool _paused;
+
         public Extractor()
         {
+            _paused = false;
             _ukCulture = CultureInfo.GetCultureInfo("en-GB");
-            _logger = new StreamWriter("diagnostics.log", true);
 
-            //read app config
-            var folder = ConfigurationManager.AppSettings[CfgFolderName];
+            var logFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diagnostics.log");
+            _logger = new StreamWriter(logFile, true);
+
+            //System.Diagnostics.Debugger.Launch();
+
+            //read app.config
+            //csv folder
+            var folder = ConfigurationManager.AppSettings[CfgCsvFolderName];
             if (string.IsNullOrEmpty(folder))
             {
                 Log("Csv folder is not set or empty. Using default value");
-                folder = DefaultFolder;
-                AddOrUpdateAppSettings(CfgFolderName, DefaultFolder);
+                folder = DefaultCsvFolder;
+                AddOrUpdateAppSettings(CfgCsvFolderName, DefaultCsvFolder);
             }
+
+            //extract frequency
             if (!int.TryParse(ConfigurationManager.AppSettings[CfgFreqName], out int freq))
             {
                 Log("Extraction frequency is not set or has invalid format. Using default value");
@@ -89,6 +101,7 @@ namespace PowerPosition.Core
         {
             await Extract();
             _timer.Elapsed += async (o, i) => { await Extract(); };
+            _timer.Start();
         }
 
         /// <summary>
@@ -96,6 +109,8 @@ namespace PowerPosition.Core
         /// </summary>
         private async Task Extract()
         {
+            if (_paused)
+                return;
             var now = DateTime.Now;
             IEnumerable<Trade> trades = null;
             try
@@ -198,10 +213,31 @@ namespace PowerPosition.Core
             _logger.Flush();
         }
 
-        ~Extractor()
+        /// <summary>
+        ///     Stop extractor and release resourses
+        /// </summary>
+        public void Stop()
         {
             _timer?.Stop();
             _logger?.Close();
+        }
+
+        /// <summary>
+        ///     Pause extractions routine
+        /// </summary>
+        public void Pause()
+        {
+            _paused = true;
+            Log("Paused");
+        }
+        
+        /// <summary>
+        ///     Continue extractions routine
+        /// </summary>
+        public void Continue()
+        {
+            _paused = false;
+            Log("Continued");
         }
     }
 }

@@ -14,6 +14,7 @@ namespace PowerPosition.Portable
             extractor.Start();
 
             Console.ReadKey();
+            extractor.Stop();
         }
     }
 }
