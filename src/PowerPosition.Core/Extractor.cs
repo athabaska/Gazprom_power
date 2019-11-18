@@ -18,12 +18,10 @@ namespace PowerPosition.Core
     {
         private const string CfgCsvFolderName = "csvFolder";
         private const string DefaultCsvFolder = "extractions";
-        private const string CfgLogFolderName = "logFolder";
-        private const string DefaultLogFolder = "logs";
         private const string CfgFreqName = "extractFrequency";
         private const int DefaultFreq = 5;
         private const string CsvFileHeader = "LocalTime;Volume";
-        private const int ServiceErrorDelay = 5 * 1000;
+        private readonly int  _serviceErrorDelay;
 
         /// <summary>
         ///     Trading service
@@ -33,7 +31,7 @@ namespace PowerPosition.Core
         /// <summary>
         ///     CSV files writer
         /// </summary>
-        private readonly CsvWriter _csvWriter;
+        private readonly ICsvWriter _csvWriter;
 
         /// <summary>
         ///     Culture for numbers output
@@ -50,12 +48,45 @@ namespace PowerPosition.Core
         /// </summary>
         private readonly StreamWriter _logger;
 
+        /// <summary>
+        ///     Paused extracting
+        /// </summary>
         private bool _paused;
 
+        /// <summary>
+        ///     Test constructor
+        /// </summary>
+        /// <param name="csvWriter">Csv writer interface</param>
+        /// <param name="repeatDelay">Repeat delay in case of TradingService exception</param>
+        internal Extractor(ICsvWriter csvWriter, int repeatDelay)
+        {
+            _paused = false;
+            _ukCulture = CultureInfo.GetCultureInfo("en-GB");
+            _serviceErrorDelay = repeatDelay;
+
+            var logFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diagnostics.log");
+            _logger = new StreamWriter(logFile, true);
+
+            _csvWriter = csvWriter;
+
+            try
+            {                
+                _tradingService = new TradingService();
+            }
+            catch (Exception ex)
+            {
+                Log(ex.Message);
+            }
+        }
+
+        /// <summary>
+        ///     Regular constructor
+        /// </summary>
         public Extractor()
         {
             _paused = false;
             _ukCulture = CultureInfo.GetCultureInfo("en-GB");
+            _serviceErrorDelay = 5 * 1000; //repeat delay in case of TradingService exception
 
             var logFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "diagnostics.log");
             _logger = new StreamWriter(logFile, true);
@@ -80,6 +111,9 @@ namespace PowerPosition.Core
                 AddOrUpdateAppSettings(CfgFreqName, DefaultFreq.ToString(_ukCulture));
             }
 
+            _timer = new System.Timers.Timer();
+            _timer.Interval = freq * 60 * 1000;
+
             try
             {
                 _csvWriter = new CsvWriter(folder, CsvFileHeader);
@@ -89,9 +123,6 @@ namespace PowerPosition.Core
             {
                 Log(ex.Message);
             }
-            
-            _timer = new System.Timers.Timer();
-            _timer.Interval = freq * 60 * 1000;
         }
 
         /// <summary>
@@ -99,6 +130,9 @@ namespace PowerPosition.Core
         /// </summary>
         public async void Start()
         {
+            if (_timer == null)
+                return; //just in case
+            Log("Started");
             await Extract();
             _timer.Elapsed += async (o, i) => { await Extract(); };
             _timer.Start();
@@ -107,7 +141,7 @@ namespace PowerPosition.Core
         /// <summary>
         ///     Perform extraction of trading data, write results in csv
         /// </summary>
-        private async Task Extract()
+        internal async Task Extract()
         {
             if (_paused)
                 return;
@@ -121,11 +155,11 @@ namespace PowerPosition.Core
             {
                 Log(ex.Message);
                 //cant miss extract
-                Log($"Repeating extract in {ServiceErrorDelay} ms");
+                Log($"Repeating extract in {_serviceErrorDelay} ms");
                 var worker = new BackgroundWorker();
                 worker.DoWork += async delegate
                 {
-                    Thread.Sleep(ServiceErrorDelay);
+                    Thread.Sleep(_serviceErrorDelay);
                     await Extract();
                     worker.Dispose();
                 };
@@ -137,45 +171,61 @@ namespace PowerPosition.Core
 
             try
             {
-                //aggregate volumes by period
-                var periodVolumes = new SortedDictionary<int, double>();
-                foreach (var t in trades)
-                {
-                    foreach (var period in t.Periods)
-                    {
-                        if (!periodVolumes.TryGetValue(period.Period, out double vol))
-                        {
-                            periodVolumes[period.Period] = period.Volume;
-                        }
-                        else
-                        {
-                            periodVolumes[period.Period] = vol + period.Volume;
-                            //todo worry about precision?
-                        }
-                    }
-                }
-
-                if (periodVolumes.Count != 24)
-                {
+                var aggregations = AggregateTrades(trades);
+                if (aggregations.Count != 24)
                     Log("Amount of periods is not 24");
-                }
-
-                //prepare csv lines
-                var lines = new List<string>();
-                var ts = new DateTime(now.Year, now.Month, now.Day).AddHours(-1); //start at 23:00 previous day
-                foreach (var p in periodVolumes.Keys)
-                {
-                    lines.Add($"{ts.ToString("HH:mm")};{periodVolumes[p].ToString(_ukCulture)}");
-                    ts = ts.AddHours(1);
-                }
-
+                var lines = PrepareOutput(aggregations);
                 //write to csv
                 _csvWriter.Dump($"{now.ToString("yyyyMMdd_HHmm")}.csv", lines);
-            }      
+            }
             catch (Exception ex)
             {
                 Log(ex.Message);
             }
+        }
+
+        /// <summary>
+        ///     Aggregate trades
+        /// </summary>
+        /// <param name="trades">Trades from trading service</param>
+        /// <returns>Results(Period -> aggreated volume)</returns>
+        internal SortedDictionary<int, double> AggregateTrades(IEnumerable<Trade> trades)
+        {
+            var periodVolumes = new SortedDictionary<int, double>();
+            foreach (var t in trades)
+            {
+                foreach (var period in t.Periods)
+                {
+                    if (!periodVolumes.TryGetValue(period.Period, out double vol))
+                    {
+                        periodVolumes[period.Period] = period.Volume;
+                    }
+                    else
+                    {
+                        periodVolumes[period.Period] = vol + period.Volume;
+                        //todo worry about precision?
+                    }
+                }
+            }
+            return periodVolumes;
+        }
+
+        /// <summary>
+        ///     Prepare strings for output
+        /// </summary>
+        /// <param name="aggregations">Trades aggregated by periods</param>
+        /// <returns>Csv lines</returns>
+        internal IList<string> PrepareOutput(SortedDictionary<int, double> aggregations)
+        { 
+            var lines = new List<string>();
+            var ts = new DateTime(2000, 1, 1).AddHours(-1); //start at 23:00 previous day
+            foreach (var p in aggregations.Keys)
+            {
+                lines.Add($"{ts.ToString("HH:mm")};{aggregations[p].ToString(_ukCulture)}");
+                ts = ts.AddHours(1);
+            }
+
+            return lines;
         }
 
         /// <summary>
@@ -218,6 +268,7 @@ namespace PowerPosition.Core
         /// </summary>
         public void Stop()
         {
+            Log("Stopping...");
             _timer?.Stop();
             _logger?.Close();
         }

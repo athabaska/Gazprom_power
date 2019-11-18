@@ -4,9 +4,23 @@ using System.IO;
 namespace PowerPosition.Core
 {
     /// <summary>
+    ///     Interface for csv writer
+    /// </summary>
+    public interface ICsvWriter
+    {
+        /// <summary>
+        ///     Write collection of strings to file
+        /// </summary>
+        /// <param name="fileName">File name</param>
+        /// <param name="lines">Strings</param>
+        /// <returns>Success</returns>
+        void Dump(string fileName, IEnumerable<string> lines);
+    }
+
+    /// <summary>
     ///     CSV file dumper
     /// </summary>
-    public sealed class CsvWriter
+    public sealed class CsvWriter : ICsvWriter
     {
         /// <summary>
         ///     Folder to store csv files
